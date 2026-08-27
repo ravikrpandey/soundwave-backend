@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { DEMO_PLAYLISTS, DEMO_PLAYLIST_TRACKS, DEMO_TRACKS } from "../../../server/catalog.ts";
-import { trpcBatchPayload } from "./protocol.ts";
+import { parseTrpcInputs, trpcBatchPayload } from "./protocol.ts";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const secretKeys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}");
@@ -23,14 +23,10 @@ type User = Record<string, unknown> & { id: number; openId: string };
 function json(data: unknown, status = 200) { return new Response(JSON.stringify(data), { status, headers }); }
 function trpc(data: unknown) { return json({ result: { data: { json: data } } }); }
 function trpcBatch(data: unknown[]) { return json(trpcBatchPayload(data)); }
-function inputsOf(url: URL): any[] {
-  const raw = url.searchParams.get("input");
-  if (!raw) return [{}];
-  const parsed = JSON.parse(raw);
-  const entries = url.searchParams.has("batch")
-    ? Object.keys(parsed).sort((left, right) => Number(left) - Number(right)).map(key => parsed[key])
-    : [parsed];
-  return entries.map(entry => entry?.json ?? entry);
+async function inputsOf(request: Request, url: URL): Promise<any[]> {
+  const queryInput = url.searchParams.get("input");
+  const raw = queryInput ?? (request.method === "GET" ? null : await request.text());
+  return parseTrpcInputs(raw, url.searchParams.has("batch"));
 }
 
 async function table<T = any>(client: SupabaseClient, name: string, query: (q: any) => any): Promise<T[]> {
@@ -157,7 +153,7 @@ Deno.serve(async request => {
     const user = await getUser(token);
     const path = url.pathname.split("/").filter(Boolean).pop() ?? "";
     const procedures = (path === "trpc" ? url.searchParams.get("path") ?? "" : path).split(",").filter(Boolean);
-    const inputs = inputsOf(url);
+    const inputs = await inputsOf(request, url);
     if (url.searchParams.has("batch")) {
       const values = await Promise.all(procedures.map((procedure, index) => handleProcedure(procedure, inputs[index] ?? {}, user)));
       return trpcBatch(values);

@@ -22,13 +22,15 @@ type User = Record<string, unknown> & { id: number; openId: string };
 
 function json(data: unknown, status = 200) { return new Response(JSON.stringify(data), { status, headers }); }
 function trpc(data: unknown) { return json({ result: { data: { json: data } } }); }
-function trpcBatch(data: unknown) { return json(trpcBatchPayload(data)); }
-function inputOf(url: URL): any {
+function trpcBatch(data: unknown[]) { return json(trpcBatchPayload(data)); }
+function inputsOf(url: URL): any[] {
   const raw = url.searchParams.get("input");
-  if (!raw) return {};
+  if (!raw) return [{}];
   const parsed = JSON.parse(raw);
-  const first = parsed?.["0"];
-  return first?.json ?? first ?? parsed?.json ?? parsed;
+  const entries = url.searchParams.has("batch")
+    ? Object.keys(parsed).sort((left, right) => Number(left) - Number(right)).map(key => parsed[key])
+    : [parsed];
+  return entries.map(entry => entry?.json ?? entry);
 }
 
 async function table<T = any>(client: SupabaseClient, name: string, query: (q: any) => any): Promise<T[]> {
@@ -154,9 +156,14 @@ Deno.serve(async request => {
   try {
     const user = await getUser(token);
     const path = url.pathname.split("/").filter(Boolean).pop() ?? "";
-    const procedure = path === "trpc" ? url.searchParams.get("path") ?? "" : path;
-    const value = await handleProcedure(procedure, inputOf(url), user);
-    return url.searchParams.has("batch") ? trpcBatch(value) : trpc(value);
+    const procedures = (path === "trpc" ? url.searchParams.get("path") ?? "" : path).split(",").filter(Boolean);
+    const inputs = inputsOf(url);
+    if (url.searchParams.has("batch")) {
+      const values = await Promise.all(procedures.map((procedure, index) => handleProcedure(procedure, inputs[index] ?? {}, user)));
+      return trpcBatch(values);
+    }
+    const value = await handleProcedure(procedures[0] ?? "", inputs[0], user);
+    return trpc(value);
   } catch (error) {
     console.error("[soundwave-api]", error instanceof Error ? error.message : error);
     return json({ error: { message: error instanceof Error ? error.message : "Request failed", data: { code: "INTERNAL_SERVER_ERROR" } } }, 500);
